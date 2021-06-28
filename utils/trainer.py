@@ -79,9 +79,8 @@ def train_HybridPartSwapping(model, train_loader, optimizer, scheduler, criterio
             param_info = f', Radius: {radius}, Num. Proposals: {num_proposals}'
 
             rand_index = torch.randperm(batch.size()[0]).cuda()
-
             batch_original = batch.clone().detach()
-
+            
             for batch_idx in range(batch.shape[0]):
                 target_idx = rand_index[batch_idx]
                 # print(target_idx)
@@ -89,9 +88,10 @@ def train_HybridPartSwapping(model, train_loader, optimizer, scheduler, criterio
                 x_min_b, x_max_b, y_min_b, y_max_b = attention_box[target_idx].int()
                 # print(f'Image A({batch_idx}): ({x_min_a},{y_min_a}), ({x_max_a},{y_max_a})')
                 # print(f'Image B({target_idx}): ({x_min_b},{y_min_b}), ({x_max_b},{y_max_b})\n')
+
                 
                 batch[batch_idx, :, x_min_a:x_max_a, y_min_a:y_max_a] = batch_original[target_idx, :, x_min_b:x_max_b, y_min_b:y_max_b]
-            # exit()
+                
             n_mix = (radius + 1) ** 2 # Number of zeros in attention_mask
             mix_ratio = n_mix/(W_f*H_f) # Ratio of image_b
         
