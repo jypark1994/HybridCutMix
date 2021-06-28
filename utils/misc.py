@@ -70,6 +70,63 @@ def generate_attentive_mask(attention_map, radius=1, num_proposals=3, allow_boun
         
     return mask
 
+def generate_attentive_box(attention_map, radius=1, num_proposals=3, allow_boundary=False):
+    """
+        Author: Junyoung Park (jy_park@inu.ac.kr)
+        Input:
+            attention_map   (Tensor) : NxWxH tensor after GAP.
+            radius           (Tensor)
+        Output:
+            mask            (Tensor) : NxWxH tensor for masking attentive regions
+            coords          (Tensor) : Normalized coordinates(cx, cy) for masked regions
+    """
+    N, W, H = attention_map.shape
+
+    x = attention_map.reshape([N, W *H])
+
+    _, indices = torch.sort(x, descending=True, dim=1)
+
+    if num_proposals == 1:
+        targets = indices[:, 0] # [N, Most Intensive]
+    else:
+        targets = indices[:, 0:num_proposals] # [N, Most Intensive]
+        idx_proposal = torch.randint(low=0, high=num_proposals, size=(1,))[0]
+        targets = targets[:, idx_proposal]
+
+    mask = torch.ones_like(attention_map)
+
+    coords = torch.zeros([N, 4])
+
+    for i in range(N):
+        (top_x, top_y) = (targets[i]//W , targets[i]%W)
+
+        # Get x, y constraint
+        x_min, x_max = (top_x - radius, top_x + radius + 1)
+        y_min, y_max = (top_y - radius, top_y + radius + 1)
+
+        # To keep the region in square shape
+        if allow_boundary == False:
+            if x_min < 0:
+                x_min = 0
+                x_max = radius*2 + 1
+            if x_max > W - 1:
+                x_min = W - 1 - radius*2
+                x_max = W
+            if y_min < 0:
+                y_min = 0
+                y_max = radius*2 + 1
+            if y_max > H - 1:
+                y_min = H - 1 - radius*2
+                y_max = H
+
+        coords[i] = torch.Tensor([x_min, x_max, y_min, y_max])
+
+        # For debugging
+        # print(f"x: ({x_min},{x_max})")
+        # print(f"y: ({y_min},{y_max})")
+        
+    return coords
+
 class Wrapper(nn.Module):
     '''
         Author: Junyoung Park (jy_park@inu.ac.kr)

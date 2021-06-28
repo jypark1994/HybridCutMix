@@ -9,16 +9,16 @@ To install requirements:
 ```setup
 pip install -r requirements.txt
 ```
-
+## Data Preperation
 To download datasets:
 
-CUB-200-2011: 
+    CUB-200-2011: 
 
-Stanford Cars:
+    Stanford Cars:
 
-IP102:
+    IP102:
 
-MosquitoDL: 
+    MosquitoDL
 
 ## Training
 

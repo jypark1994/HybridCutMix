@@ -7,7 +7,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from utils.trainer import *
-from utils.misc import generate_attentive_mask, rand_bbox
+from utils.misc import generate_attentive_box, rand_bbox
 
 def train_HybridPartSwapping(model, train_loader, optimizer, scheduler, criterion, cur_epoch, device, **kwargs):
     """
@@ -67,20 +67,33 @@ def train_HybridPartSwapping(model, train_loader, optimizer, scheduler, criterio
             class_activation_map = torch.mul(target_fmap, importance_weights).sum(dim=1, keepdim=True) # [N x 1 x W_f x H_f]
             class_activation_map = F.relu(class_activation_map).squeeze(dim=1) # [N x W_f x H_f]
 
-            attention_masks = generate_attentive_mask(class_activation_map, radius=radius, num_proposals=num_proposals, allow_boundary=False) # [N, W, H]
+            # Get Image A mask
+            # Get Image B mask
+            # Overwrite target region on A to target of B
+
+            attention_box = generate_attentive_box(class_activation_map, radius=radius, num_proposals=num_proposals, allow_boundary=False) # [N, W, H]
+            attention_box = (attention_box/W_f)*batch.shape[2] # Scaling attention box from the feature size to the original image size.
+            # print(attention_box)
+            # exit()
+
             param_info = f', Radius: {radius}, Num. Proposals: {num_proposals}'
 
-            upsampled_attention_masks = F.interpolate(attention_masks.unsqueeze(1).repeat([1,3,1,1]), 
-                size=batch.shape[-2:], mode='nearest')
-
-            n_mix = (radius + 1) ** 2 # Number of zeros in attention_mask
-            mix_ratio = n_mix/(W_f*H_f)
-            
             rand_index = torch.randperm(batch.size()[0]).cuda()
-            image_a = upsampled_attention_masks * batch
-            image_b = (1 - upsampled_attention_masks) * batch[rand_index]
 
-            batch = image_a + image_b
+            batch_original = batch.clone().detach()
+
+            for batch_idx in range(batch.shape[0]):
+                target_idx = rand_index[batch_idx]
+                # print(target_idx)
+                x_min_a, x_max_a, y_min_a, y_max_a = attention_box[batch_idx].int()
+                x_min_b, x_max_b, y_min_b, y_max_b = attention_box[target_idx].int()
+                # print(f'Image A({batch_idx}): ({x_min_a},{y_min_a}), ({x_max_a},{y_max_a})')
+                # print(f'Image B({target_idx}): ({x_min_b},{y_min_b}), ({x_max_b},{y_max_b})\n')
+                
+                batch[batch_idx, :, x_min_a:x_max_a, y_min_a:y_max_a] = batch_original[target_idx, :, x_min_b:x_max_b, y_min_b:y_max_b]
+            # exit()
+            n_mix = (radius + 1) ** 2 # Number of zeros in attention_mask
+            mix_ratio = n_mix/(W_f*H_f) # Ratio of image_b
         
             target_a = labels
             target_b = labels[rand_index]
@@ -93,133 +106,12 @@ def train_HybridPartSwapping(model, train_loader, optimizer, scheduler, criterio
             if target_stage_index < 3:          # Fine grained features
                 loss = criterion(pred, labels)  # - No label mixing
             else:
-                loss = criterion(pred, target_a) * mix_ratio + criterion(pred, target_b) * (1-mix_ratio)
+                loss = criterion(pred, target_a) * (1 - mix_ratio) + criterion(pred, target_b) * (mix_ratio)
 
         else:
             loss = criterion(pred, labels)
 
         if idx%150 == 0 and cur_epoch % 10 == 0:
-            input_ex = make_grid(batch.detach().cpu(), normalize=True, nrow=8, padding=2).permute([1,2,0])
-            fig, ax = plt.subplots(1,1,figsize=(8*2,2*(batch.size(0)//8)+1))
-            ax.imshow(input_ex)
-            ax.set_title(f"Train Original Batch Examples\nCut_Prob:{cut_prob}, Cur_Target: {target_stage_name}, {param_info}")
-            ax.axis('off')
-            fig.savefig(os.path.join(save_path, f"Train_Orig_BatchSample_E{cur_epoch}_I{idx}.png"))
-            plt.draw()
-            plt.clf()
-            plt.close("all")
-            
-            
-        train_loss += loss.detach().cpu().numpy()
-        train_n_samples += labels.size(0)
-        train_n_corrects += torch.sum(pred_max == labels).detach().cpu().numpy()
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-    
-    scheduler.step()
-
-    epoch_train_loss = train_loss / len(train_loader)
-    epoch_train_acc = train_n_corrects/train_n_samples
-
-    return model, epoch_train_loss, epoch_train_acc
-
-def train_HybridCutMix(model, train_loader, optimizer, scheduler, criterion, cur_epoch, device, **kwargs):
-    """
-        Author: Junyoung Park (jy_park@inu.ac.kr)
-
-        HybridCutMix: Regularization and Augmentation 
-
-        model(torch.nn.Module): Target model to train.
-        train_loader(list(DataLoader)): Should be a list with splitted dataset.
-        vervose(bool): Print detailed train/val status.
-    """
-    epoch_train_loss = 0
-    epoch_train_acc = 0
-
-    cut_prob = kwargs['cut_prob']
-    save_path = kwargs['save_path']
-    final_radius = kwargs['radius']
-    p_multiplier = kwargs['multiplier']
-    model.train()
-
-    train_loss = 0
-    train_n_corrects = 0
-    train_n_samples = 0
-
-    for idx, data in enumerate(train_loader):
-
-        batch, labels = data[0].to(device), data[1].to(device)
-        
-        optimizer.zero_grad()
-
-        pred = model(batch)
-        pred_max = torch.argmax(pred, 1)
-
-        target_stage_name = 'None'
-
-        r = np.random.rand(1)[0]
-
-        param_info = ''
-        if r < cut_prob:
-            target_stage_index = torch.randint(low=1, high=model.num_stages, size=(1,))[0]
-            # target_stage_index = torch.randint(low=0, high=2, size=(1,))[0]
-            final_radius = final_radius * (model.num_stages - target_stage_index)
-
-            if target_stage_index < 3:
-                final_radius = final_radius // 4
-            
-            num_proposals = (model.num_stages - target_stage_index) * p_multiplier
-
-            target_stage_name = model.stage_names[target_stage_index]
-
-            loss = criterion(pred, labels)
-            
-            loss.backward()
-
-            target_fmap = model.dict_activation[target_stage_name]
-            target_gradients = model.dict_gradients[target_stage_name][0]
-            optimizer.zero_grad()
-            model.clear_dict()
-
-            N, C, W_f, H_f = target_fmap.shape
-
-            n_total_pixels = W_f * H_f
-
-            importance_weights = F.adaptive_avg_pool2d(target_gradients, 1) # [N x C x 1 x 1]
-
-            class_activation_map = torch.mul(target_fmap, importance_weights).sum(dim=1, keepdim=True) # [N x 1 x W_f x H_f]
-            class_activation_map = F.relu(class_activation_map).squeeze(dim=1) # [N x W_f x H_f]
-
-            attention_masks = generate_attentive_mask(class_activation_map, radius=final_radius, num_proposals=num_proposals) # [N, W, H]
-            param_info = f', Radius: {final_radius}, Num. Proposals: {num_proposals}'
-            n_non_zero_pixels = attention_masks.sum(dim=1).sum(dim=1) # [N]
-
-            upsampled_attention_masks = F.interpolate(attention_masks.unsqueeze(1).repeat([1,3,1,1]), 
-                size=batch.shape[-2:], mode='nearest')
-
-            occlusion_ratio = (1 - (n_non_zero_pixels/n_total_pixels)).mean() # 1 - Mixed Ratio
-            rand_index = torch.randperm(batch.size()[0]).cuda()
-            image_a = upsampled_attention_masks * batch
-            image_b = (1 - upsampled_attention_masks) * batch[rand_index]
-
-            batch = image_a + image_b
-        
-            target_a = labels
-            target_b = labels[rand_index]
-
-            pred = model(batch)
-            pred_max = torch.argmax(pred, 1)
-
-            if target_stage_index < 3:          # Fine grained features
-                loss = criterion(pred, labels)  # - No label mixing
-            else:
-                loss = criterion(pred, target_a) * (1 - occlusion_ratio) + criterion(pred, target_b) * occlusion_ratio
-
-        else:
-            loss = criterion(pred, labels)
-
-        if idx%150 == 0 and cur_epoch % 1 == 0:
             input_ex = make_grid(batch.detach().cpu(), normalize=True, nrow=8, padding=2).permute([1,2,0])
             fig, ax = plt.subplots(1,1,figsize=(8*2,2*(batch.size(0)//8)+1))
             ax.imshow(input_ex)
