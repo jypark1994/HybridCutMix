@@ -47,6 +47,7 @@ def train_HybridPartSwapping(model, train_loader, optimizer, scheduler, criterio
 
         param_info = ''
         if r < cut_prob:
+            radius = torch.randint(low=0, high=radius+1,size=[1])[0]
             target_stage_index = model.num_stages - 1
 
             target_stage_name = model.stage_names[target_stage_index]
