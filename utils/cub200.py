@@ -21,8 +21,6 @@ class CUB200(Dataset):
         self.loader = default_loader
         self.train = train
 
-        print("!!!self.root" + self.root, flush=True)
-        
         if download:
             self._download()
 

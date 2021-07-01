@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+from torch.nn.modules import activation
 from torchvision.utils import make_grid
 
 import os
@@ -47,7 +48,6 @@ def train_HybridPartSwapping(model, train_loader, optimizer, scheduler, criterio
 
         param_info = ''
         if r < cut_prob:
-            radius = torch.randint(low=0, high=radius+1,size=[1])[0]
             target_stage_index = model.num_stages - 1
 
             target_stage_name = model.stage_names[target_stage_index]
@@ -56,70 +56,71 @@ def train_HybridPartSwapping(model, train_loader, optimizer, scheduler, criterio
             
             loss.backward()
 
-            print("shape of model.dict_activation:" + str(model.dict_activation[target_stage_name].shape))
-            #print("shape of model.dict_gradients:" + str(model.dict_gradients[target_stage_name].shape))
-            print("shape of model.dict_gradients:" + str(len(model.dict_gradients[target_stage_name])))
-            target_fmap = model.dict_activation[target_stage_name]
-            target_gradients = model.dict_gradients[target_stage_name][0]
+            # print("shape of model.dict_activation:" + str(model.dict_activation[target_stage_name][0].shape))
+            # print("shape of model.dict_gradients:" + str((model.dict_gradients[target_stage_name][0].shape)))
+
+            # gather activation and gradients from multiple gpus            
+            dict_activation = [item.to('cuda:'+str(torch.cuda.current_device())) for item in model.dict_activation[target_stage_name]]
+            dict_gradients = [item.to('cuda:'+str(torch.cuda.current_device())) for item in model.dict_gradients[target_stage_name]]
+            # dict_activation = [item.to('cuda:'+str(torch.cuda.current_device())) for item in model.dict_activation[target_stage_name][::-1]]
+            # dict_gradients = [item.to('cuda:'+str(torch.cuda.current_device())) for item in model.dict_gradients[target_stage_name][::-1]]
+
+            target_fmap = torch.cat(dict_activation, dim=0)
+            target_gradients = torch.cat(dict_gradients, dim=0)
+            
             optimizer.zero_grad()
             model.clear_dict()
 
             N, C, W_f, H_f = target_fmap.shape
 
-            importance_weights = F.adaptive_avg_pool2d(target_gradients, 1) # [N x C x 1 x 1]
+            # wchkang: normalize
+            l2_norm = torch.sqrt(torch.mean(torch.pow(target_gradients, 2))) + 1e-5
+            target_gradients = target_gradients / l2_norm
 
-            print("dim of importance_weights:" + str(importance_weights.size()), flush=True)
-            print("target_fmap:" + str(target_fmap.size()), flush=True)
-            
-            target_fmap = target_fmap.to('cuda:'+str(torch.cuda.current_device()))
-            importance_weights = importance_weights.to('cuda:'+str(torch.cuda.current_device()))
-            X = torch.mul(target_fmap, importance_weights)
-            print("dim of X:" + str(X.size()))
+            importance_weights = F.adaptive_avg_pool2d(target_gradients, 1) # [N x C x 1 x 1]
 
             class_activation_map = torch.mul(target_fmap, importance_weights).sum(dim=1, keepdim=True) # [N x 1 x W_f x H_f]
             class_activation_map = F.relu(class_activation_map).squeeze(dim=1) # [N x W_f x H_f]
-            print("dim of class_activation_map:" + str(class_activation_map.size()))
+
+            #radius = torch.randint(low=0, high=radius+1,size=[1])[0]
+            rand_radius = torch.randint(low=max(radius-1,0), high=min(radius+1, class_activation_map.shape[1]), size=[1])[0]
+
             # Get Image A mask
             # Get Image B mask
             # Overwrite target region on A to target of B
-
-            attention_box = generate_attentive_box(class_activation_map, radius=radius, num_proposals=num_proposals, allow_boundary=False) # [N, W, H]
+            attention_box = generate_attentive_box(class_activation_map, radius=rand_radius, num_proposals=num_proposals, allow_boundary=False) # [N, W, H]
             attention_box = (attention_box/W_f)*batch.shape[2] # Scaling attention box from the feature size to the original image size.
             # print(attention_box)
             # exit()
 
-            param_info = f', Radius: {radius}, Num. Proposals: {num_proposals}'
+            param_info = f', Radius: {rand_radius}, Num. Proposals: {num_proposals}'
 
-            rand_index = torch.randperm(batch.size()[0]//2).cuda() 
-            #print("rand_index:" + str(rand_index))
+            rand_index = torch.randperm(batch.size()[0]).cuda() 
             batch_original = batch.clone().detach()
-            
+            #print("rand_index:" + str(rand_index), flush=True)
+            # for i,v in enumerate(rand_index):
+            #     print(str(i) + "\t" + str(v), flush=True)
 
-            print("dim of attention_box:" + str(attention_box.size()))
-            #print("# gpus:" + args.gpus)
-            print("batch.shape:" + str(batch.shape))
-            for batch_idx in range(batch.shape[0]//2):
-                target_idx = rand_index[batch_idx]
-                # print(target_idx)
+            #for batch_idx in range(batch.shape[0]//2):
+            for batch_idx in range(batch.shape[0]):
+                target_idx = rand_index[batch_idx] 
                 x_min_a, x_max_a, y_min_a, y_max_a = attention_box[batch_idx].int()
                 x_min_b, x_max_b, y_min_b, y_max_b = attention_box[target_idx].int()
                 # print(f'Image A({batch_idx}): ({x_min_a},{y_min_a}), ({x_max_a},{y_max_a})')
                 # print(f'Image B({target_idx}): ({x_min_b},{y_min_b}), ({x_max_b},{y_max_b})\n')
-
-                
                 batch[batch_idx, :, x_min_a:x_max_a, y_min_a:y_max_a] = batch_original[target_idx, :, x_min_b:x_max_b, y_min_b:y_max_b]
+                #wchkang 
+                #batch[target_idx, :, x_min_b:x_max_b, y_min_b:y_max_b] = batch_original[batch_idx, :, x_min_a:x_max_a, y_min_a:y_max_a]
                 
-            n_mix = (radius + 1) ** 2 # Number of zeros in attention_mask
+            n_mix = (rand_radius + 1) ** 2 # Number of zeros in attention_mask
             mix_ratio = n_mix/(W_f*H_f) # Ratio of image_b
         
-            X= torch.cat((rand_index, torch.arange(batch.shape[0]//2,batch.shape[0]).cuda()),0)
-            #print(X)
-
             target_a = labels
-            target_b = labels[X]
+            target_b = labels[rand_index]
 
             pred = model(batch)
             pred_max = torch.argmax(pred, 1)
+            # print(rand_radius)
             # print(1-mix_ratio)
             # print(mix_ratio)
 
@@ -131,7 +132,7 @@ def train_HybridPartSwapping(model, train_loader, optimizer, scheduler, criterio
         else:
             loss = criterion(pred, labels)
 
-        if idx%150 == 0 and cur_epoch % 10 == 0:
+        if idx%50 == 0 and cur_epoch % 5 == 0:
             input_ex = make_grid(batch.detach().cpu(), normalize=True, nrow=8, padding=2).permute([1,2,0])
             fig, ax = plt.subplots(1,1,figsize=(8*2,2*(batch.size(0)//8)+1))
             ax.imshow(input_ex)

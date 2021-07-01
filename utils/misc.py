@@ -145,14 +145,12 @@ class Wrapper(nn.Module):
 
         def forward_hook_function(name): # Hook function for the forward pass.
             def get_class_activation(module, input, output):
-                self.dict_activation[name] = output.data
-                #print("[forward hook] gpu id:" + str(torch.cuda.current_device()))
+                self.dict_activation[name][torch.cuda.current_device()] = output.data
             return get_class_activation
 
         def backward_hook_function(name): # Hook function for the backward pass. ver=1.7.1
             def get_class_gradient(module, input, output):
-                self.dict_gradients[name] = output
-                #print("[backward hook] gpu id:" + str(torch.cuda.current_device()))
+                self.dict_gradients[name][torch.cuda.current_device()] = output[0]
             return get_class_gradient
 
         for L in self.stage_names:
@@ -170,16 +168,21 @@ class Wrapper(nn.Module):
     def print_current_dicts(self):
         for k, v in self.dict_activation.items():
             print("[FW] Layer:", k)
-            print("[FW] Shape:", v.shape)
+            print("[FW] Shape-0:", v[0].shape)
         for k, v in self.dict_gradients.items():
             print("[BW] Layer:", k)      
-            print("[BW] Shape:", v[0].shape)
+            print("[BW] Shape-0:", v[0].shape,flush=True)
 
     def clear_dict(self):
+        for sname in self.stage_names:
+            self.dict_activation[sname]=None
+            self.dict_gradients[sname]=None
+        # print(self.dict_activation.keys())
+        # print(self.dict_activation)
         for k, v in self.dict_activation.items():
-            v = None
-        for k, v in self.dict_gradients.items():
-            v = None
+            self.dict_activation[k]=[None for item in range(torch.cuda.device_count())]
+            self.dict_gradients[k]=[None for item in range(torch.cuda.device_count())]
+
 
 def rand_bbox(size, lam): 
     '''
