@@ -146,11 +146,13 @@ class Wrapper(nn.Module):
         def forward_hook_function(name): # Hook function for the forward pass.
             def get_class_activation(module, input, output):
                 self.dict_activation[name] = output.data
+                #print("[forward hook] gpu id:" + str(torch.cuda.current_device()))
             return get_class_activation
 
         def backward_hook_function(name): # Hook function for the backward pass. ver=1.7.1
             def get_class_gradient(module, input, output):
                 self.dict_gradients[name] = output
+                #print("[backward hook] gpu id:" + str(torch.cuda.current_device()))
             return get_class_gradient
 
         for L in self.stage_names:

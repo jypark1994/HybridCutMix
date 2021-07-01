@@ -240,7 +240,6 @@ def CUB200_loaders(root, crop_size=224, batch_size=(64,32), num_workers=4):
             transforms.Normalize(mean=(0.485, 0.456, 0.406),
                                  std=(0.229, 0.224, 0.225))
     ])
-
     train_dataset = CUB200(root, transform = train_transforms, train=True, download=False)
     train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=bs_train, shuffle=True, num_workers=num_workers)
     val_dataset = CUB200(root, transform = val_transforms, train=False, download=False)

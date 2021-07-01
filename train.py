@@ -59,7 +59,7 @@ scheduler_step = args.scheduler_step
 
 os.makedirs(save_path, exist_ok=True)
 f_print = open(os.path.join(save_path, 'output.txt'), 'w')
-sys.stdout = f_print # Change the standard output to the file we created.
+#sys.stdout = f_print # Change the standard output to the file we created.
 print(args)
 
 

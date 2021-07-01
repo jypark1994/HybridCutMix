@@ -56,6 +56,9 @@ def train_HybridPartSwapping(model, train_loader, optimizer, scheduler, criterio
             
             loss.backward()
 
+            print("shape of model.dict_activation:" + str(model.dict_activation[target_stage_name].shape))
+            #print("shape of model.dict_gradients:" + str(model.dict_gradients[target_stage_name].shape))
+            print("shape of model.dict_gradients:" + str(len(model.dict_gradients[target_stage_name])))
             target_fmap = model.dict_activation[target_stage_name]
             target_gradients = model.dict_gradients[target_stage_name][0]
             optimizer.zero_grad()
@@ -65,9 +68,17 @@ def train_HybridPartSwapping(model, train_loader, optimizer, scheduler, criterio
 
             importance_weights = F.adaptive_avg_pool2d(target_gradients, 1) # [N x C x 1 x 1]
 
+            print("dim of importance_weights:" + str(importance_weights.size()), flush=True)
+            print("target_fmap:" + str(target_fmap.size()), flush=True)
+            
+            target_fmap = target_fmap.to('cuda:'+str(torch.cuda.current_device()))
+            importance_weights = importance_weights.to('cuda:'+str(torch.cuda.current_device()))
+            X = torch.mul(target_fmap, importance_weights)
+            print("dim of X:" + str(X.size()))
+
             class_activation_map = torch.mul(target_fmap, importance_weights).sum(dim=1, keepdim=True) # [N x 1 x W_f x H_f]
             class_activation_map = F.relu(class_activation_map).squeeze(dim=1) # [N x W_f x H_f]
-
+            print("dim of class_activation_map:" + str(class_activation_map.size()))
             # Get Image A mask
             # Get Image B mask
             # Overwrite target region on A to target of B
@@ -79,10 +90,15 @@ def train_HybridPartSwapping(model, train_loader, optimizer, scheduler, criterio
 
             param_info = f', Radius: {radius}, Num. Proposals: {num_proposals}'
 
-            rand_index = torch.randperm(batch.size()[0]).cuda()
+            rand_index = torch.randperm(batch.size()[0]//2).cuda() 
+            #print("rand_index:" + str(rand_index))
             batch_original = batch.clone().detach()
             
-            for batch_idx in range(batch.shape[0]):
+
+            print("dim of attention_box:" + str(attention_box.size()))
+            #print("# gpus:" + args.gpus)
+            print("batch.shape:" + str(batch.shape))
+            for batch_idx in range(batch.shape[0]//2):
                 target_idx = rand_index[batch_idx]
                 # print(target_idx)
                 x_min_a, x_max_a, y_min_a, y_max_a = attention_box[batch_idx].int()
@@ -96,8 +112,11 @@ def train_HybridPartSwapping(model, train_loader, optimizer, scheduler, criterio
             n_mix = (radius + 1) ** 2 # Number of zeros in attention_mask
             mix_ratio = n_mix/(W_f*H_f) # Ratio of image_b
         
+            X= torch.cat((rand_index, torch.arange(batch.shape[0]//2,batch.shape[0]).cuda()),0)
+            #print(X)
+
             target_a = labels
-            target_b = labels[rand_index]
+            target_b = labels[X]
 
             pred = model(batch)
             pred_max = torch.argmax(pred, 1)
