@@ -6,9 +6,13 @@ from torchvision.utils import make_grid
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
+import cv2
 
 from utils.trainer import *
 from utils.misc import generate_attentive_box, rand_bbox
+
+
 
 def train_HybridPartSwapping(model, train_loader, optimizer, scheduler, criterion, cur_epoch, device, **kwargs):
     """
@@ -33,6 +37,8 @@ def train_HybridPartSwapping(model, train_loader, optimizer, scheduler, criterio
     train_n_corrects = 0
     train_n_samples = 0
 
+    is_plot_generated = False
+
     for idx, data in enumerate(train_loader):
 
         batch, labels = data[0].to(device), data[1].to(device)
@@ -52,9 +58,22 @@ def train_HybridPartSwapping(model, train_loader, optimizer, scheduler, criterio
 
             target_stage_name = model.stage_names[target_stage_index]
 
-            loss = criterion(pred, labels)
+            # loss = criterion(pred, labels)
             
-            loss.backward()
+            # loss.backward()
+
+            one_hot = torch.FloatTensor(batch.shape[0], pred.size()[-1]).zero_()
+            # print("one_hot shape:" + str(one_hot.shape))
+            for i in range(len(labels)):
+                one_hot[i,labels[i]-1] = 1.0
+            # one_hot[:,labels] = 1.0
+            # print("min labels:" + str(labels.min()))
+            # print("labels:" + str(labels[0:5]))
+            # print("one_hot:")
+            # print(one_hot[0:5,:])
+            one_hot = one_hot.to('cuda:'+str(torch.cuda.current_device()))
+            pred.backward(gradient=one_hot, retain_graph=False)
+
 
             # print("shape of model.dict_activation:" + str(model.dict_activation[target_stage_name][0].shape))
             # print("shape of model.dict_gradients:" + str((model.dict_gradients[target_stage_name][0].shape)))
@@ -74,13 +93,16 @@ def train_HybridPartSwapping(model, train_loader, optimizer, scheduler, criterio
             N, C, W_f, H_f = target_fmap.shape
 
             # wchkang: normalize
-            l2_norm = torch.sqrt(torch.mean(torch.pow(target_gradients, 2))) + 1e-5
-            target_gradients = target_gradients / l2_norm
+            #l2_norm = torch.sqrt(torch.mean(torch.pow(target_gradients, 2))) + 1e-5
+            #target_gradients = target_gradients / l2_norm
 
             importance_weights = F.adaptive_avg_pool2d(target_gradients, 1) # [N x C x 1 x 1]
 
             class_activation_map = torch.mul(target_fmap, importance_weights).sum(dim=1, keepdim=True) # [N x 1 x W_f x H_f]
             class_activation_map = F.relu(class_activation_map).squeeze(dim=1) # [N x W_f x H_f]
+
+            # print("min:" + str(class_activation_map.min()))
+            # print("max:" + str(class_activation_map.max()))
 
             #radius = torch.randint(low=0, high=radius+1,size=[1])[0]
             rand_radius = torch.randint(low=max(radius-1,0), high=min(radius+1, class_activation_map.shape[1]), size=[1])[0]
@@ -101,7 +123,6 @@ def train_HybridPartSwapping(model, train_loader, optimizer, scheduler, criterio
             # for i,v in enumerate(rand_index):
             #     print(str(i) + "\t" + str(v), flush=True)
 
-            #for batch_idx in range(batch.shape[0]//2):
             for batch_idx in range(batch.shape[0]):
                 target_idx = rand_index[batch_idx] 
                 x_min_a, x_max_a, y_min_a, y_max_a = attention_box[batch_idx].int()
@@ -109,9 +130,8 @@ def train_HybridPartSwapping(model, train_loader, optimizer, scheduler, criterio
                 # print(f'Image A({batch_idx}): ({x_min_a},{y_min_a}), ({x_max_a},{y_max_a})')
                 # print(f'Image B({target_idx}): ({x_min_b},{y_min_b}), ({x_max_b},{y_max_b})\n')
                 batch[batch_idx, :, x_min_a:x_max_a, y_min_a:y_max_a] = batch_original[target_idx, :, x_min_b:x_max_b, y_min_b:y_max_b]
-                #wchkang 
-                #batch[target_idx, :, x_min_b:x_max_b, y_min_b:y_max_b] = batch_original[batch_idx, :, x_min_a:x_max_a, y_min_a:y_max_a]
-                
+
+               
             n_mix = (rand_radius + 1) ** 2 # Number of zeros in attention_mask
             mix_ratio = n_mix/(W_f*H_f) # Ratio of image_b
         
@@ -129,19 +149,24 @@ def train_HybridPartSwapping(model, train_loader, optimizer, scheduler, criterio
             else:
                 loss = criterion(pred, target_a) * (1 - mix_ratio) + criterion(pred, target_b) * (mix_ratio)
 
+            if (is_plot_generated == False and cur_epoch % 5 == 0):
+                # generate a grid of batch images
+                input_ex = make_grid(batch.detach().cpu(), normalize=True, nrow=8, padding=2).permute([1,2,0])
+                fig, ax = plt.subplots(1,1,figsize=(8*2,2*(batch.size(0)//8)+1))
+                ax.imshow(input_ex)
+                ax.set_title(f"Train Original Batch Examples\nCut_Prob:{cut_prob}, Cur_Target: {target_stage_name}, {param_info}")
+                ax.axis('off')
+                fig.savefig(os.path.join(save_path, f"Train_Orig_BatchSample_E{cur_epoch}_I{idx}.png"))
+                plt.draw()
+                plt.clf()
+                plt.close("all")
+
+                is_plot_generated = True
+            
+
         else:
             loss = criterion(pred, labels)
 
-        if idx%50 == 0 and cur_epoch % 5 == 0:
-            input_ex = make_grid(batch.detach().cpu(), normalize=True, nrow=8, padding=2).permute([1,2,0])
-            fig, ax = plt.subplots(1,1,figsize=(8*2,2*(batch.size(0)//8)+1))
-            ax.imshow(input_ex)
-            ax.set_title(f"Train Original Batch Examples\nCut_Prob:{cut_prob}, Cur_Target: {target_stage_name}, {param_info}")
-            ax.axis('off')
-            fig.savefig(os.path.join(save_path, f"Train_Orig_BatchSample_E{cur_epoch}_I{idx}.png"))
-            plt.draw()
-            plt.clf()
-            plt.close("all")
             
             
         train_loss += loss.detach().cpu().numpy()
